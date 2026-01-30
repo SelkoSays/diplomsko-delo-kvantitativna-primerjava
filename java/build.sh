@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+rm -rf bin
+
+javac --source-path src -d bin src/stressor/Stressor.java $*

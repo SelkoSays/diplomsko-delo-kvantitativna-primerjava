@@ -1,0 +1,437 @@
+\chapter{Primerjava učinkovitosti}
+
+V tem poglavju si bomo pogledali kvantitativno primerjavo upravljanja s pomnilnikom v izbranih programskih jezikih. Program je na voljo na tej povezavi: https://github.com/SelkoSays/diplomsko-delo-kvantitativna-primerjava.
+
+\section{Opis programa}
+
+Za kvantitativno primerjavo upravljanja s pomnilnikom smo implementirali primerjalne teste (angl. \textit{benchmark}) za primerjavo učinkovitosti porabe pomnilnika in izvajanja. Program izvaja nastavljivo število dejavnosti dodeljevanja in sproščanja blokov pomnilnika različnih velikosti, ter ob vsaki dejavnosti beleži statistiko o porabi pomnilnika.
+
+Namen programa je simulacija realističnih vzorcev dodeljevanja pomnilnika, ki se pojavljajo v različnih aplikacijah. S konfiguracijo parametrov lahko simuliramo različne scenarije uporabe pomnilnika, kot so preprosti vzorci z enakomernimi velikostmi blokov, ali kompleksni vzorci z različnimi porazdelitvami velikosti in časovno omejeno življenjsko dobo blokov.
+
+Za program smo naredili naslednje meritve:
+\begin{itemize}
+	\item čas izvajanja programa
+	\item največja velikost, ki jo je proces zasedal v pomnilniku med izvajanjem
+	\item učinkovitost porabe pomnilnika
+	\item in druge meritve, ki niso vključene v tej nalogi (npr. vpliv različnih čistilcev pomnilnika v Javi)
+	      % \item Največjo skupno velikost dodeljenih blokov (angl. \textit{peak size allocated})
+	      % \item Skupno velikost vseh dodelitev (angl. \textit{total size allocated})
+	      % \item Število vseh dodelitev (angl. \textit{total number of allocations})
+	      % \item Trenutno velikost dodeljenih blokov (angl. \textit{current size allocated})
+	      % \item Sistemske statistike pomnilnika iz \texttt{/proc/self/status} (VmRSS, VmPeak, itd.)
+\end{itemize}
+
+Rezultati se zapisujejo v datoteko CSV, kar omogoča nadaljnjo analizo in primerjavo med implementacijami v različnih programskih jezikih.
+
+\section{Parametri primerjalnega testa}
+
+V tem razdelku bomo podrobneje opisali parametre, ki vplivajo na potek primerjalnega testa. Razumevanje teh parametrov je ključno za pravilno interpretacijo rezultatov in za konfiguracijo testov, ki ustrezajo specifičnim scenarijem uporabe.
+
+\subsection{Glavna zanka programa}
+
+Jedro programa predstavlja glavna zanka, ki v vsaki iteraciji izvede eno od dveh operacij: dodelitev novega bloka ali sprostitev obstoječega bloka. Odločitev je odvisna od trenutnega števila aktivnih blokov in nastavljene verjetnosti dodelitve (parameter \ci{--alloc-freq}).
+
+\vfill
+\pagebreak
+\noindent\begin{minipage}[t]{1\textwidth}
+	\begin{minted}[xleftmargin=20pt,linenos]{c}
+// C: glavno delovanje programa
+void block_action(Pool *pool, const Args *args) {
+    if (args->ttl_mode.as.e != TTL_OFF) {
+        // Posodobi TTL, odstrani potekle
+        pool_update_and_prune(pool);
+    }
+
+    // Verjetnost alloc_freq
+    bool alloc = should_alloc(pool, args);
+
+    if (!alloc) {
+        // Sprostitev po pravilu sproščanja
+        pool_del_block(pool, args->policy.as.e);
+    } else {
+        // Dodelitev bloka v skladu s parametri
+        Int block_size = get_block_size(args);
+        SInt block_ttl = get_block_ttl(args);
+        Block *block =
+        pool_add_block_with_ttl(pool, block_size, block_ttl);
+        if (block != NULL) {
+            // Dotik strani pomnilnika
+            touch_pages(block, args->touch_stride.as.i);
+        }
+    }
+}
+\end{minted}
+\end{minipage}
+
+\vspace{0.25cm}
+
+Funkcija \ci{should_alloc()} vrne \ci{true}, če je trenutno število blokov manjše od kapacitete bazena (kjer so bloki shranjeni) in če naključno število (na intervalu [0, 1]) pade pod nastavljeno vrednost \ci{alloc_freq}. Privzeta vrednost je 0.7, kar pomeni, da je verjetnost dodelitve 70\%, če bazen še ni poln. V nasprotnem primeru bo funkcija vrnila \ci{false}, kar bo povzročilo brisanje bloka (po pravilu sproščanja). Ob dodelitvi bloka, se prav tako dotaknemo pomnilnika tega bloka, da realiziramo dejanski pomnilnik (glej poglavje \ref{sec:touch_pages}).
+
+\subsection{Porazdelitve velikosti blokov}
+
+Velikost novo dodeljenega bloka se določi naključno glede na izbrano porazdelitev. Program podpira tri porazdelitve, ki jih nastavimo s parametrom \ci{--distribution} (ali \ci{-d}):
+
+\begin{itemize}
+	\item \textbf{Enakomerna (uniform)} -- Vse velikosti na intervalu [min, max] imajo enako verjetnost izbire. To je privzeta nastavitev.
+	\item \textbf{Eksponentna (exp)} -- Večja verjetnost izbire manjše velikosti, ker izbira večje velikosti pada eksponentno. Parameter \ci{--dist-param} določa vrednost $\lambda$, ki vpliva na hitrost padanja verjetnosti izbire.
+	\item \textbf{Potenčna (powerlaw)} -- Sledi potenčni porazdelitvi, ki je značilna za realne aplikacije, kjer veliko majhnih dodelitev spremlja nekaj zelo velikih. Parameter \ci{--dist-param} določa eksponent $\alpha$.
+\end{itemize}
+
+\noindent\begin{minipage}[t]{1\textwidth}
+	\begin{minted}[xleftmargin=20pt,linenos]{c}
+// C: izbira velikosti glede na porazdelitev
+Int next_random(Int min, Int max, Float param, Distribution distribution) {
+    switch (distribution) {
+    case DISTRIBUTION_UNIFORM:
+        return next_uniform(min, max);
+    case DISTRIBUTION_EXP:
+        return next_exponential(min, max, param);  // param = lambda
+    case DISTRIBUTION_POWERLAW:
+        return next_powerlaw(min, max, param);     // param = alpha
+    }
+}
+\end{minted}
+\end{minipage}
+
+\vspace{0.75cm}
+
+Potenčna porazdelitev je najprimernejša za simulacijo realnih obremenitev, saj večina aplikacij izvaja veliko majhnih dodelitev (npr. nizi, majhni objekti) in občasno velike dodelitve (npr. medpomnilniki, slike).
+
+\subsection{Trendi velikosti blokov}
+
+Poleg naključne porazdelitve lahko nastavimo tudi časovni trend spreminjanja velikosti blokov s parametrom \ci{--size-trend}. Trendi simulirajo vzorce, kjer se delovna množica sčasoma povečuje, zmanjšuje ali ciklično spreminja.
+
+\begin{itemize}
+	\item \textbf{TREND\_NONE} -- Velikosti so neodvisne in naključno izbrane glede na porazdelitev. Privzeta nastavitev.
+	\item \textbf{TREND\_GROW} -- Velikosti se postopoma povečujejo od najmanjše proti največji.
+	\item \textbf{TREND\_SHRINK} -- Velikosti se postopoma zmanjšujejo od največje proti najmanjši.
+	\item \textbf{TREND\_SAW} -- Velikosti ciklično naraščajo od najmanjše do največje in se nato ponastavijo (žagasti vzorec).
+\end{itemize}
+
+Parameter \ci{--size-step} določa, za koliko se velikost spremeni med iteracijami, \ci{--trend-jitter} pa dodaja naključno variacijo koraku za bolj realističen vzorec.
+
+
+\vfill
+\pagebreak
+\noindent\begin{minipage}[t]{0.95\textwidth}
+	% \footnotesize
+	\begin{minted}[xleftmargin=20pt,linenos]{c}
+// C: izračun velikosti bloka glede na trend
+static Int trend_block_size(const Args *args) {
+    SInt jitter =
+    next_uniform(0, args->trend_jitter * 2) - args->trend_jitter;
+
+    switch (args->size_trend.as.e) {
+    case TREND_NONE:
+        return next_random(args->min_size, args->max_size, ...);
+    case TREND_GROW:
+        block_size_tmp += args->size_step + jitter;  // Povečaj
+        return clamp(min, max, block_size_tmp);
+    case TREND_SAW:
+        block_size_tmp += args->size_step + jitter;
+        // Ponastavi
+        if (block_size_tmp > max) block_size_tmp = min;
+        return block_size_tmp;
+    // ...
+    }
+}
+\end{minted}
+\end{minipage}
+
+\subsection{Življenjska doba blokov (TTL)}
+
+Sistem življenjske dobe blokov (angl. \textit{time-to-live}, TTL) omogoča samodejno sproščanje blokov po določenem številu iteracij, neodvisno od pravila sproščanja. To simulira delovanje aplikacij.
+
+Parameter \ci{--ttl-mode} določa način delovanja:
+
+\begin{itemize}
+	\item \textbf{TTL\_OFF} -- Bloki se sproščajo samo po izbranemu pravilu sproščanja. Privzeta nastavitev.
+	\item \textbf{TTL\_FIXED} -- Vsi bloki imajo enako življenjsko dobo, določeno s parametrom \ci{--ttl-fixed}.
+	\item \textbf{TTL\_LIST} -- Življenjska doba se naključno izbere iz seznama vrednosti (parameter \ci{--ttl-list}) z možnimi utežmi (\ci{--ttl-mix}).
+\end{itemize}
+
+\noindent\begin{minipage}[t]{1\textwidth}
+	\begin{minted}[xleftmargin=20pt,linenos]{c}
+// C: določitev življenjske dobe bloka
+static SInt get_block_ttl(const Args *args) {
+    switch (args->ttl_mode.as.e) {
+    // Blok nima nastavljene življenjske dobe
+    case TTL_OFF:   return -1L;
+    // Enotna življenjska doba
+    case TTL_FIXED: return args->ttl_fixed;
+    case TTL_LIST: 
+    return random_wchoice(&args->ttl_list, &args->ttl_mix);
+    }
+}
+
+// C: posodobitev in odstranitev poteklih blokov
+void pool_update_and_prune(Pool *pool) {
+    DequeNode *dn = pool->items.head;
+    while (dn != NULL) {
+        Block *blk = &dn->blk;
+        if (blk->ttl > 0) blk->ttl--;  // Zmanjšaj TTL
+        if (blk->ttl == 0) {
+            DequeNode *tmp = dn;
+            dn = dn->next;
+            // Odstrani potekel blok
+            deque_pop_node(&pool->items, tmp);
+        } else {
+            dn = dn->next;
+        }
+    }
+}
+\end{minted}
+\end{minipage}
+
+\subsection{Dotikanje strani pomnilnika} \label{sec:touch_pages}
+
+Ko operacijski sistem dodeli pomnilnik procesu, pogosto uporablja tehniko lenega dodeljevanja (angl. \textit{lazy allocation}). To pomeni, da se fizične strani pomnilnika dejansko dodelijo šele ob prvem dostopu (branju ali pisanju), ko se sproži napaka strani (angl. \textit{page fault}).
+
+Da bi zagotovili realistično merjenje porabe fizičnega pomnilnika, program po vsaki dodelitvi zapiše v vsako stran bloka (``se dotakne strani''). Parameter \ci{--touch-stride} določa korak med zapisi -- privzeta vrednost 4096 bajtov ustreza tipični velikosti strani na sistemih x86.
+
+\noindent\begin{minipage}[t]{1\textwidth}
+	\begin{minted}[xleftmargin=20pt,linenos]{c}
+// C: dotikanje strani za realizacijo pomnilnika
+void touch_pages(Block *block, Int stride) {
+    Int rnd_val = 0xA5;
+    for (Int off = 0; off < block->size; off += stride) {
+        // Dotik strani
+        ((volatile char *)block->data)[off] = (u8)rnd_val;
+        rnd_val = rnd_val * 0x5DEECE66D + 0xB;
+    }
+}
+\end{minted}
+\end{minipage}
+
+\vspace{0.25cm}
+
+Brez dotikanja strani bi meritve RSS (\textit{resident set size}; tj. del glavnega pomnilnika, ki ga zaseda proces) pokazale manjše vrednosti, kot je dejansko dodeljeni pomnilnik, saj bi operacijski sistem odlašal z dodeljevanjem fizičnih strani.
+
+\subsection{Pravila sproščanja}
+
+Program podpira različna pravila sproščanja blokov, ki jih nastavimo s parametrom \ci{--policy} (ali \ci{-p}). Pravilo določa, kateri blok se sprosti, ko je potrebno zmanjšati število aktivnih blokov.
+
+\vfill
+\noindent\begin{minipage}[t]{1\textwidth}
+	\begin{minted}[xleftmargin=20pt,linenos]{c}
+// C: sproščanje v skladu s parametrom --policy
+void pool_del_block(Pool *pool, Policy policy) {
+    switch (policy) {
+    case POLICY_LIFO:
+        deque_pop_back(&pool->items);  // Zadnji noter, prvi ven
+        break;
+    case POLICY_FIFO:
+        deque_pop_front(&pool->items); // Prvi noter, prvi ven
+        break;
+    case POLICY_RANDOM:
+        deque_pop(&pool->items, next_uniform(0, pool->items.count));
+        break;
+    case POLICY_BIG_FIRST:
+        // Najprej sprosti največji blok
+        deque_pop_node(&pool->items, deque_find_max(&pool->items));
+        break;
+    case POLICY_SMALL_FIRST:
+        // Najprej sprosti najmanjši blok
+        deque_pop_node(&pool->items, deque_find_min(&pool->items));
+        break;
+    case POLICY_NEVER:
+        break;  // Nikoli ne sprosti
+    }
+}
+\end{minted}
+\end{minipage}
+
+\vspace{0.25cm}
+
+Različna pravila simulirajo različne vzorce uporabe pomnilnika v realnih aplikacijah. Pravilo LIFO simulira delovanje sklada (npr. rekurzivni klici funkcij), FIFO simulira delovanje vrste (npr. medpomnilnik sporočil), BIG\_FIRST in SMALL\_FIRST pa simulirata strategije upravljanja pomnilnika, ki dajejo prednost sproščanju večjih oziroma manjših blokov.
+
+\subsection{Povzetek parametrov ukazne vrstice}
+
+V tabelah~\ref{tab:cli-flags-1} in~\ref{tab:cli-flags-2} so povzeti glavni parametri ukazne vrstice, s katerimi nastavljamo obnašanje stresnega testa.
+
+\begin{table}[H]
+	\centering
+	\footnotesize
+	\begin{tabular}{|l|l|p{5.5cm}|}
+		\hline
+		\textbf{Parameter}      & \textbf{Privzeto} & \textbf{Opis}                                                           \\
+		\hline
+		\multicolumn{3}{|c|}{\textit{Splošni parametri}}                                                                      \\
+		\hline
+		\ci{-p, --policy}       & lifo              & Politika sproščanja (lifo, fifo, random, big-first, small-first, never) \\
+		\hline
+		\ci{-n, --iterations}   & 100000            & Število operacij dodelitve/sprostitve                                   \\
+		\hline
+		\ci{-D, --duration}     & -                 & Trajanje testa v sekundah (alternativa \ci{-n})                         \\
+		\hline
+		\ci{-f, --alloc-freq}   & 0.7               & Verjetnost dodelitve (0.0 -- 1.0)                                       \\
+		\hline
+		\ci{-s, --seed}         & 0                 & Seme za PRNG (0 = trenutni čas)                                         \\
+		\hline
+		\multicolumn{3}{|c|}{\textit{Bazen blokov}}                                                                           \\
+		\hline
+		\ci{-c, --capacity}     & 10000             & Največje število hkratnih blokov                                        \\
+		\hline
+		\multicolumn{3}{|c|}{\textit{Velikost blokov}}                                                                        \\
+		\hline
+		\ci{-a, --min-size}     & 16B               & Najmanjša velikost bloka                                                \\
+		\hline
+		\ci{-A, --max-size}     & 1MiB              & Največja velikost bloka                                                 \\
+		\hline
+		\ci{-d, --distribution} & uniform           & Porazdelitev velikosti (uniform, exp, powerlaw)                         \\
+		\hline
+		\ci{-r, --dist-param}   & 1.0               & Parameter porazdelitve ($\lambda$ ali $\alpha$)                         \\
+		\hline
+		\ci{--size-trend}       & none              & Trend velikosti (none, grow, shrink, saw)                               \\
+		\hline
+		\ci{--size-step}        & 1                 & Korak spremembe velikosti pri trendu                                    \\
+		\hline
+		\ci{--trend-jitter}     & 0                 & Naključna variacija koraka trenda                                       \\
+		\hline
+	\end{tabular}
+	\caption{Parametri ukazne vrstice primerjalnega testa (1. del)}
+	\label{tab:cli-flags-1}
+\end{table}
+
+\vfill
+\pagebreak
+
+\begin{table}[H]
+	\centering
+	\footnotesize
+	\begin{tabular}{|l|l|p{5.5cm}|}
+		\hline
+		\textbf{Parameter}       & \textbf{Privzeto} & \textbf{Opis}                              \\
+		\hline
+		\multicolumn{3}{|c|}{\textit{Življenjska doba blokov}}                                    \\
+		\hline
+		\ci{--ttl-mode}          & off               & Način TTL (off, fixed, list)               \\
+		\hline
+		\ci{--ttl-fixed}         & 100               & Fiksna življenjska doba (za \ci{fixed})    \\
+		\hline
+		\ci{--ttl-list}          & -                 & Seznam vrednosti TTL (za \ci{list})        \\
+		\hline
+		\multicolumn{3}{|c|}{\textit{Dotikanje in izhod}}                                         \\
+		\hline
+		\ci{-t, --touch-stride}  & 4096              & Korak med zapisi pri dotikanju strani      \\
+		\hline
+		\ci{-i, --snap-interval} & 1000              & Interval zapisovanja metrik (v iteracijah) \\
+		\hline
+		\ci{-o, --output}        & -                 & Pot do CSV datoteke z meritvami            \\
+		\hline
+	\end{tabular}
+	\caption{Parametri ukazne vrstice primerjalnega testa (2. del)}
+	\label{tab:cli-flags-2}
+\end{table}
+
+\section{Rezultati}
+
+V tem razdelku predstavljamo rezultate meritev, pridobljene s primerjalnim testom. Pomembno je poudariti, da nismo testirali vseh možnih kombinacij parametrov, temveč smo se osredotočili na reprezentativne scenarije, ki najbolje ponazarjajo razlike v upravljanju s pomnilnikom.
+
+Testirali smo naslednje ključne vidike:
+\begin{itemize}
+	\item \textbf{[MRSS]} \textbf{Največja poraba pomnilnika (max RSS):} Največja zasedenost pomnilnika med izvajanjem.
+	\item \textbf{[EE]} \textbf{Učinkovitost izvajanja (hitrost):} Čas, potreben za dokončanje določenega števila iteracij.
+	\item \textbf{[RME]} \textbf{Relativno učinkovitost porabe pomnilnika:} Razmerje med učinkovitostjo porabe pomnilnika v jeziku C in posameznim jezikom. \textbf{[ME]} Učinkovitost se je računala tako: $\frac{\text{Največ prostora, ki ga zasedajo bloki}}{\textit{Max RSS}}$
+	\item \textbf{Odzivnost na specifične vzorce:} Kako se programi odzivajo na velike bloke, hitro menjavo objektov in dolgotrajen pritisk na pomnilnik.
+\end{itemize}
+
+% \subsection{Kvantitativna primerjava in analitika}
+
+Spodnja tabela (\ref{tab:metrics-summary}) prikazuje povzetek ključnih metrik za izbrane scenarije. Scenariji so bili izbrani tako, da pokrijejo različne pogoje, od simulacije realnih aplikacij do stopnjevanja velikosti blokov.
+
+\begin{table}[H]
+	\centering
+	\footnotesize
+	\begin{tabular}{|l|r|r|r|r|}
+		\hline
+		\textbf{Jezik} & \textbf{MRSS [MB]} & \textbf{EE [s]} & \textbf{ME [\%]} & \textbf{RME [\%]} \\
+		\hline
+		\multicolumn{5}{|c|}{\textbf{Scenarij: Pravilo sproščanja - Big First}}                      \\
+		\hline
+		C              & 9,03               & 2,30            & 59,83            & 100,00            \\
+		C++            & 10,58              & 1,60            & 51,03            & 85,28             \\
+		Java           & 784,23             & 3,95            & 0,69             & 1,15              \\
+		Rust           & 9,63               & 1,48            & 56,06            & 93,70             \\
+		\hline
+		\multicolumn{5}{|c|}{\textbf{Scenarij: Trend - Grow}}                                        \\
+		\hline
+		C              & 16002,54           & 6,44            & 99,98            & 100,00            \\
+		C++            & 16004,07           & 12,50           & 99,97            & 99,99             \\
+		Java           & 24027,80           & 16,06           & 66,59            & 66,60             \\
+		Rust           & 16002,74           & 5,85            & 99,98            & 100,00            \\
+		\hline
+		\multicolumn{5}{|c|}{\textbf{Scenarij: Realističen (Porazdelitev - Powerlaw)}}               \\
+		\hline
+		C              & 94,41              & 1,71            & 96,45            & 100,00            \\
+		C++            & 95,95              & 1,69            & 94,91            & 98,40             \\
+		Java           & 1549,49            & 3,74            & 5,88             & 6,09              \\
+		Rust           & 94,77              & 0,95            & 96,09            & 99,63             \\
+		\hline
+		\multicolumn{5}{|c|}{\textbf{Scenarij: Pravilo sproščanja - Small First}}                    \\
+		\hline
+		C              & 19,33              & 2,43            & 84,60            & 100,00            \\
+		C++            & 20,60              & 1,57            & 79,41            & 93,86             \\
+		Java           & 911,21             & 4,10            & 1,80             & 2,12              \\
+		Rust           & 19,48              & 1,50            & 83,99            & 99,27             \\
+		\hline
+		\multicolumn{5}{|c|}{\textbf{Scenarij: Mešane življenjske dobe}}                             \\
+		\hline
+		C              & 26,59              & 1,98            & 83,62            & 100,00            \\
+		C++            & 27,95              & 2,22            & 79,53            & 95,10             \\
+		Java           & 1751,51            & 4,63            & 1,27             & 1,52              \\
+		Rust           & 27,29              & 1,10            & 81,47            & 97,43             \\
+		\hline
+	\end{tabular}
+	\caption{Rezultati meritev po scenarijih}
+	\label{tab:metrics-summary}
+\end{table}
+
+\begin{figure}[H]
+	\includegraphics[width=1\textwidth, center]{max_rss.png}
+	\caption{Največja poraba pomnilnika (Max RSS) po scenarijih}
+	\label{fig:max-rss}
+\end{figure}
+
+Glavna ugotovitev meritev je ogromen režijski strošek (angl. \textit{overhead}) Jave. Pri scenariju \textit{Pravilo sproščanja - Big First} Java porabi kar 784 MB, medtem ko jeziki C, C++ in Rust ostajajo pod 11 MB. Kar pomeni, da Java pri majhnih potrebah po pomnilniku, v tem primeru, porabi več kot 100-krat več pomnilniškega prostora kot ostali (ročno upravljani) jeziki. Slika \ref{fig:max-rss} nazorno prikazuje te razlike v porabi.
+
+\vfill
+\pagebreak
+\begin{figure}[H]
+	\includegraphics[width=1\textwidth, center]{execution_time.png}
+	\caption{Primerjava časa izvajanja med jeziki}
+	\label{fig:execution-time}
+\end{figure}
+
+Glede hitrosti izvajanja (slika \ref{fig:execution-time}) se je Rust, v tem primeru, izkazal za najhitrejšega, pogosto celo hitrejšega od jezika C. Zanimivo je opaziti, da ima C++ precejšnje težave pri scenariju \textit{Trend - Grow}, kjer je čas izvajanja (12,5 s) skoraj enkrat daljši kot pri Rustu (5,8 s) ali C-ju (6,4 s). To kaže na manj učinkovito upravljanje z vedno večjimi pomnilniškimi bloki v standardnem C++.
+
+\vfill
+\pagebreak
+\begin{figure}[H]
+	\includegraphics[width=1\textwidth, center]{memory_efficiency_vs_c.png}
+	\caption{Učinkovitost porabe pomnilnika v primerjavi z jezikom C}
+	\label{fig:mem-efficiency}
+\end{figure}
+
+Na podlagi učinkovitosti porabe pomnilnika (slika \ref{fig:mem-efficiency}) je iz tabele (\ref{tab:metrics-summary}) razvidno, da C najbolj učinkovito porablja pomnilnik, po drugi strani, pa je Java za primere, kjer se pomnilnika potrebuje malo, zelo neučinkovita.
+
+\vfill
+\pagebreak
+\begin{figure}[H]
+	\includegraphics[width=1\textwidth, center]{iterations_per_minute.png}
+	\caption{Število iteracij na minuto pri dolgotrajnem pritisku}
+	\label{fig:iterations-min}
+\end{figure}
+
+Tudi pri dolgotrajnem pritisku na pomnilnik (scenarij \textit{Dolgotrajni pritisk}) Rust dominira s številom iteracij na minuto (slika \ref{fig:iterations-min}), kar potrjuje njegovo primernost za visoko-zmogljive sisteme.
+
+\section{Ključne ugotovitve}
+
+Rezultati meritev so potrdili teoretična pričakovanja, hkrati pa postregli z nekaterimi presenečenji:
+
+\begin{itemize}
+	\item \textbf{Java:} Pričakovano je najpočasnejša in najmanj učinkovita pri rabi pomnilnika. Visoka poraba RSS (Slika \ref{fig:max-rss}) je neposredna posledica delovanja JVM in čistilca pomnilnika (GC), ki za svoje delovanje potrebuje precejšnjo zalogo pomnilnika. Java je v realnih scenarijih dosegla le okoli 6 \% učinkovitosti porabe pomnilnika C-ja.
+	\item \textbf{Rust:} Izkazal se je za zmagovalca testov. Ne le, da nudi varnost brez čistilca pomnilnika, temveč s svojimi optimizacijami dosega in, v tem primeru, presega surovo hitrost C-ja. To dokazuje, da sistem lastništva (\textit{ownership}) ne prinaša le varnosti, temveč tudi učinkovitost zaradi zagotovitev na katere se zanaša.
+	\item \textbf{C++:} Čeprav je zelo učinkovit, so meritve v scenariju z rastočimi velikostmi blokov pokazale, da je lahko manj predvidljiv kot Rust ali C. Njegova poraba pomnilnika je bila v večini primerov primerljiva C-ju, vendar s slabšimi časi pri specifičnih vzorcih dodeljevanja.
+	\item \textbf{C:} Kot referenčni jezik je ohranil stabilno in visoko učinkovitost, vendar ga je Rust v večini hitrostnih testov premagal, kar kaže na dobro optimizacijo prevajalnika za Rust.
+\end{itemize}
