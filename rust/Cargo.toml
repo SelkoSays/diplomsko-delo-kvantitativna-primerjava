@@ -1,0 +1,12 @@
+[package]
+name = "rust-test"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["log-level-debug"]
+log-level-debug = ["log-level-info", "log-level-warn", "log-level-error"]
+log-level-info = ["log-level-warn", "log-level-error"]
+log-level-warn = ["log-level-error"]
+log-level-error = []
+no-ansi = []
